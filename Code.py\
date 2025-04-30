@@ -1,101 +1,97 @@
-import multiprocessing
+import threading
 import time
 
-# Global variable for fruit count in the tree
-total_fruits = 30
+# Shared resources
+tree_fruits = [i for i in range(1, 31)]  # Global tree with 30 fruits
+tree_lock = threading.Lock()
 
-# Crate size (12 slots)
-CRATE_SIZE = 12
+crate = []  # Shared crate with max 12 fruits
+crate_lock = threading.Lock()
+crate_full = threading.Condition(crate_lock)  # Notifies when crate is full
+crate_empty = threading.Condition(crate_lock)  # Notifies when crate is emptied by loader
 
-# Tree class
-class Tree:
-    def __init__(self, fruits):
-        self.fruits = fruits
+truck = []  # List of crates loaded into the truck
+done_picking = threading.Event()  # Signal when all pickers are done
 
-    def pick_fruit(self):
-        # Mimics picking fruit from the tree
-        if self.fruits:
-            return self.fruits.pop(0)
-        return None
-
-# Picker class (the workers)
-class Picker(multiprocessing.Process):
-    def __init__(self, tree, crate, loader, lock, picker_id):
+class Picker(threading.Thread):
+    def __init__(self, picker_id):
         super().__init__()
-        self.tree = tree
-        self.crate = crate
-        self.loader = loader
-        self.lock = lock
         self.picker_id = picker_id
 
     def run(self):
         while True:
-            fruit = self.tree.pick_fruit()
-            if fruit is None:
-                break  # Tree is empty
-            
-            with self.lock:
-                # Adding fruit to the crate
-                self.crate.append(fruit)
-                print(f"Picker-{self.picker_id} picked fruit {fruit} and placed it in crate.")
+            with tree_lock:
+                if tree_fruits:
+                    fruit = tree_fruits.pop()
+                    print(f"[Picker {self.picker_id}] Picked fruit {fruit}.")
+                else:
+                    break
 
-                if len(self.crate) == CRATE_SIZE:
-                    print(f"Picker-{self.picker_id} crate full. Calling loader...")
-                    self.loader.load_crate(self.crate)
-                    self.crate.clear()  # Empty the crate after loading
-                    print(f"Picker-{self.picker_id} crate is now empty.")
+            with crate_lock:
+                while len(crate) == 12:
+                    print(f"[Picker {self.picker_id}] Crate full, waiting for loader.")
+                    crate_full.notify()  # Notify loader to load crate
+                    crate_empty.wait()  # Wait for loader to empty crate
 
-        # If the tree is empty and there are fruits in the crate, pass them to the loader
-        if self.crate:
-            self.loader.load_crate(self.crate)
-            print(f"Picker-{self.picker_id} loaded remaining fruits into the truck.")
+                crate.append(fruit)
+                print(f"[Picker {self.picker_id}] Placed fruit {fruit} in crate. Crate size: {len(crate)}/12")
 
-# Loader class (responsible for loading the crate into the truck)
-class Loader(multiprocessing.Process):
-    def __init__(self, lock, truck):
-        super().__init__()
-        self.lock = lock
-        self.truck = truck
+                if len(crate) == 12:
+                    print(f"[Picker {self.picker_id}] Crate is now full. Notifying loader.")
+                    crate_full.notify()
 
-    def load_crate(self, crate):
-        with self.lock:
-            print(f"Loader is loading a crate into the truck: {crate}")
-            self.truck.append(crate)
-            print("Loader has finished loading the crate.")
+        print(f"[Picker {self.picker_id}] No more fruits to pick. Exiting.")
 
-# Main function to simulate the entire process
+class Loader(threading.Thread):
+    def run(self):
+        while True:
+            with crate_lock:
+                while len(crate) < 12 and not done_picking.is_set():
+                    crate_full.wait()  # Wait until crate is full or all pickers are done
+
+                if len(crate) == 0 and done_picking.is_set():
+                    break  # Exit if crate is empty and pickers are done
+
+                if crate:
+                    print("[Loader] Loading crate into truck...")
+                    time.sleep(2)  # Simulate loading time
+                    truck.append(crate.copy())
+                    print(f"[Loader] Crate loaded: {crate}")
+                    crate.clear()
+                    crate_empty.notify_all()  # Notify all pickers that crate is empty
+
+        # Final check for any partially filled crate
+        with crate_lock:
+            if crate:
+                print("[Loader] Final partial crate detected. Loading it.")
+                truck.append(crate.copy())
+                crate.clear()
+
+        print("[Loader] No more crates to load. Exiting.")
+
 def main():
-    # Create a tree with fruits
-    tree = Tree([i for i in range(1, total_fruits + 1)])
+    loader = Loader()
+    pickers = [Picker(i) for i in range(1, 4)]
 
-    # Shared resources
-    crate = multiprocessing.Manager().list()  # Shared crate among pickers
-    truck = multiprocessing.Manager().list()  # Shared truck for storing crates
-
-    # Lock to ensure mutual exclusion
-    lock = multiprocessing.Lock()
-
-    # Create and start the loader process
-    loader = Loader(lock, truck)
     loader.start()
-
-    # Create and start picker processes (3 pickers)
-    pickers = []
-    for i in range(3):
-        picker = Picker(tree, crate, loader, lock, i + 1)
-        pickers.append(picker)
+    for picker in pickers:
         picker.start()
 
-    # Wait for all pickers to finish
     for picker in pickers:
         picker.join()
 
-    # Ensure the loader finishes any remaining tasks
+    # Signal loader that all pickers are done
+    done_picking.set()
+    with crate_lock:
+        crate_full.notify_all()
+
     loader.join()
 
-    # Final output
-    print("\nAll pickers have finished. Truck contains the following crates:")
-    print(truck)
+    print("\n=== Final Report ===")
+    print(f"Crates loaded into truck: {len(truck)}")
+    for i, c in enumerate(truck, 1):
+        print(f"Crate {i}: {c}")
+    print("====================")
 
 if __name__ == "__main__":
     main()
