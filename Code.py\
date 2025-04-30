@@ -1,1 +1,74 @@
+import threading
+import time
 
+class Tree:
+    def __init__(self, fruits):
+        self.fruits = fruits  # List of fruits on the tree
+        self.lock = threading.Lock()  # Lock to ensure only one picker accesses fruits at a time
+
+    def __str__(self):
+        return str(self.fruits) 
+
+class Picker:
+    def __init__(self, picker_id):
+        self.crate = []  # Each picker has their own crate
+        self.picker_id = picker_id  # Each picker has a unique ID
+
+    def pick(self, tree, callLoader):
+        while tree.fruits:  # Continue picking as long as there are fruits on the tree
+            with tree.lock:  # Acquire lock to safely pick a fruit from the tree
+                if tree.fruits:
+                    fruit = tree.fruits.pop()  # "Pick" a fruit
+                    print(f"Picker {self.picker_id} picked fruit {fruit}")
+                    
+                    self.crate.append(fruit)  # Add fruit to picker’s crate
+
+            if len(self.crate) == 12:  # If the crate is full (12 fruits), call the loader
+                print(f"Picker {self.picker_id} crate is full, calling loader.")
+                self.crate = callLoader(self.crate)  # Empty the crate by calling the loader
+                time.sleep(1)  # Simulate the time for the loader to process the crate
+
+        # After all fruits are picked, if there are any remaining fruits in the crate, call the loader
+        if self.crate:
+            print(f"Picker {self.picker_id} is calling loader for the remaining fruits.")
+            self.crate = callLoader(self.crate)
+
+class Loader:
+    def __init__(self):
+        self.truck = []  # The truck will hold the crates
+        self.lock = threading.Lock()  # Lock to ensure mutual exclusion while loading crates
+
+    def load(self, crate):
+        with self.lock:  # Ensure that only one loader is processing crates at a time
+            print("Loader is loading the crate into the truck.")
+            self.truck.append(crate)  # Add the crate to the truck
+            time.sleep(2)  # Simulate time taken to load the crate into the truck
+        return []  # Return empty crate after loading
+
+# Main function to simulate the whole process
+def main():
+    # Initialize tree with a list of fruits
+    mytree = Tree([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+                   1, 2, 3, 4, 5, 6, 7, 8, 9, 10])  # Tree with fruits
+
+    myloader = Loader()  # Create a loader to unload crates into the truck
+    pickers = [Picker(i) for i in range(1, 4)]  # Create 3 pickers with unique IDs
+
+    # Create threads for each picker, simulating concurrent work
+    picker_threads = []
+    for picker in pickers:
+        t = threading.Thread(target=picker.pick, args=(mytree, myloader.load))
+        picker_threads.append(t)
+        t.start()
+
+    # Wait for all picker threads to finish
+    for t in picker_threads:
+        t.join()
+
+    # Output the final state of the truck and the tree
+    print("\nFinal state:")
+    print("Crates in truck:", myloader.truck)
+    print("Remaining fruits in tree:", mytree.fruits)
+
+if __name__ == "__main__":
+    main()
