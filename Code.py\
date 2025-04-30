@@ -1,128 +1,101 @@
-import multiprocessing as mp
+import multiprocessing
 import time
 
-# Shared tree of fruits
+# Global variable for fruit count in the tree
+total_fruits = 30
+
+# Crate size (12 slots)
+CRATE_SIZE = 12
+
+# Tree class
 class Tree:
     def __init__(self, fruits):
-        self.fruits = mp.Manager().list(fruits)
-        self.lock = mp.Lock()
+        self.fruits = fruits
 
     def pick_fruit(self):
+        # Mimics picking fruit from the tree
+        if self.fruits:
+            return self.fruits.pop(0)
+        return None
+
+# Picker class (the workers)
+class Picker(multiprocessing.Process):
+    def __init__(self, tree, crate, loader, lock, picker_id):
+        super().__init__()
+        self.tree = tree
+        self.crate = crate
+        self.loader = loader
+        self.lock = lock
+        self.picker_id = picker_id
+
+    def run(self):
+        while True:
+            fruit = self.tree.pick_fruit()
+            if fruit is None:
+                break  # Tree is empty
+            
+            with self.lock:
+                # Adding fruit to the crate
+                self.crate.append(fruit)
+                print(f"Picker-{self.picker_id} picked fruit {fruit} and placed it in crate.")
+
+                if len(self.crate) == CRATE_SIZE:
+                    print(f"Picker-{self.picker_id} crate full. Calling loader...")
+                    self.loader.load_crate(self.crate)
+                    self.crate.clear()  # Empty the crate after loading
+                    print(f"Picker-{self.picker_id} crate is now empty.")
+
+        # If the tree is empty and there are fruits in the crate, pass them to the loader
+        if self.crate:
+            self.loader.load_crate(self.crate)
+            print(f"Picker-{self.picker_id} loaded remaining fruits into the truck.")
+
+# Loader class (responsible for loading the crate into the truck)
+class Loader(multiprocessing.Process):
+    def __init__(self, lock, truck):
+        super().__init__()
+        self.lock = lock
+        self.truck = truck
+
+    def load_crate(self, crate):
         with self.lock:
-            if self.fruits:
-                return self.fruits.pop(0)
-            return None
+            print(f"Loader is loading a crate into the truck: {crate}")
+            self.truck.append(crate)
+            print("Loader has finished loading the crate.")
 
-# Crate shared by pickers
-class Crate:
-    def __init__(self):
-        self.fruits = mp.Manager().list()
-        self.lock = mp.Lock()
+# Main function to simulate the entire process
+def main():
+    # Create a tree with fruits
+    tree = Tree([i for i in range(1, total_fruits + 1)])
 
-    def add_fruit(self, fruit):
-        with self.lock:
-            self.fruits.append(fruit)
+    # Shared resources
+    crate = multiprocessing.Manager().list()  # Shared crate among pickers
+    truck = multiprocessing.Manager().list()  # Shared truck for storing crates
 
-    def is_full(self):
-        with self.lock:
-            return len(self.fruits) >= 12
+    # Lock to ensure mutual exclusion
+    lock = multiprocessing.Lock()
 
-    def get_and_clear(self):
-        with self.lock:
-            items = list(self.fruits)
-            self.fruits[:] = []
-            return items
+    # Create and start the loader process
+    loader = Loader(lock, truck)
+    loader.start()
 
-    def is_empty(self):
-        with self.lock:
-            return len(self.fruits) == 0
+    # Create and start picker processes (3 pickers)
+    pickers = []
+    for i in range(3):
+        picker = Picker(tree, crate, loader, lock, i + 1)
+        pickers.append(picker)
+        picker.start()
 
-# Picker process
-def picker(pid, tree, crate, full_event, empty_event, log, picker_done, done_counter):
-    while True:
-        fruit = tree.pick_fruit()
-        if fruit is None:
-            break
+    # Wait for all pickers to finish
+    for picker in pickers:
+        picker.join()
 
-        crate.add_fruit(fruit)
-        log.put(f"[Picker-{pid}] Picked fruit: {fruit}")
+    # Ensure the loader finishes any remaining tasks
+    loader.join()
 
-        if crate.is_full():
-            log.put(f"[Picker-{pid}] Crate full. Waiting for loader.")
-            full_event.set()
-            empty_event.wait()
-            empty_event.clear()
-            log.put(f"[Picker-{pid}] Resumed with empty crate.")
-
-    log.put(f"[Picker-{pid}] Finished picking.")
-    with done_counter.get_lock():
-        done_counter.value += 1
-    picker_done[pid] = True
-
-# Loader process
-def loader(crate, truck, full_event, empty_event, log, picker_done, done_counter, total_pickers):
-    while True:
-        full_event.wait()
-        full_event.clear()
-
-        fruits = crate.get_and_clear()
-        truck.append(fruits)
-        log.put(f"[Loader] Loaded crate into truck: {fruits}")
-        empty_event.set()
-
-        if done_counter.value == total_pickers:
-            break
-
-    # Handle final partial crate
-    if not crate.is_empty():
-        fruits = crate.get_and_clear()
-        truck.append(fruits)
-        log.put(f"[Loader] Loaded final partial crate: {fruits}")
-
-    log.put("[Loader] Finished loading all crates.")
-
-# Logger process
-def logger(log):
-    while True:
-        msg = log.get()
-        if msg == "DONE":
-            break
-        print(msg)
-
-# Main function
-def run_simulation():
-    mp.set_start_method("spawn")
-    fruits = list(range(1, 61))  # 60 fruits on tree
-    tree = Tree(fruits)
-    crate = Crate()
-    manager = mp.Manager()
-    truck = manager.list()
-
-    full_event = mp.Event()
-    empty_event = mp.Event()
-    log = mp.Queue()
-    done_counter = mp.Value('i', 0)
-    total_pickers = 3
-    picker_done = manager.dict({i: False for i in range(total_pickers)})
-
-    pickers = [mp.Process(target=picker, args=(i, tree, crate, full_event, empty_event, log, picker_done, done_counter)) for i in range(total_pickers)]
-    load_proc = mp.Process(target=loader, args=(crate, truck, full_event, empty_event, log, picker_done, done_counter, total_pickers))
-    log_proc = mp.Process(target=logger, args=(log,))
-
-    log_proc.start()
-    load_proc.start()
-    for p in pickers:
-        p.start()
-    for p in pickers:
-        p.join()
-    load_proc.join()
-
-    log.put("DONE")
-    log_proc.join()
-
-    print("\n--- Simulation Summary ---")
-    for i in range(len(truck)):
-        print(f"Crate {i+1}: {truck[i]}")
+    # Final output
+    print("\nAll pickers have finished. Truck contains the following crates:")
+    print(truck)
 
 if __name__ == "__main__":
-    run_simulation()
+    main()
