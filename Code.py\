@@ -1,13 +1,10 @@
-from multiprocessing import Process, Semaphore, Value, Array, current_process, Lock
+from multiprocessing import Process, Semaphore, Value, Array, Lock, current_process
 import time
 
-CRATE_SIZE = 12  # Crate holds 12 fruits
+CRATE_SIZE = 12  # Number of fruits per crate
 
 def picker(tree, crate, crate_index, tree_index, full_crate_sem, crate_lock, done_pickers, done_lock):
     while True:
-        fruit = None
-
-        # Check if there are any fruits left to pick
         with done_lock:
             if tree_index.value >= len(tree):
                 break
@@ -16,87 +13,94 @@ def picker(tree, crate, crate_index, tree_index, full_crate_sem, crate_lock, don
             if crate_index.value < CRATE_SIZE:
                 with done_lock:
                     if tree_index.value < len(tree):
-                        fruit_index = tree_index.value
-                        fruit = tree[fruit_index]
+                        fruit = tree[tree_index.value]
                         tree_index.value += 1
+                    else:
+                        fruit = None
 
                 if fruit is not None:
-                    crate[crate_index.value] = fruit
-                    print(f"{current_process().name} picked fruit {fruit} and placed it in slot [{crate_index.value}/{CRATE_SIZE - 1}]")
+                    position = crate_index.value
+                    crate[position] = fruit
                     crate_index.value += 1
+                    print(f"[{current_process().name}] Placed fruit {fruit:>2} into crate slot {position + 1}/{CRATE_SIZE}")
 
                     if crate_index.value == CRATE_SIZE:
-                        print(f"📢 {current_process().name} filled the crate. Notifying the loader...")
-                        print(f"🧺 Crate contents: {list(crate[:CRATE_SIZE])}\n")
+                        print(f"[{current_process().name}] Crate is full. Signaling loader...\n")
                         full_crate_sem.release()
 
-    # Picker done
     with done_lock:
         done_pickers.value += 1
-        print(f"✅ {current_process().name} finished. {done_pickers.value}/3 pickers done.")
+        print(f"[{current_process().name}] Finished. ({done_pickers.value}/3 pickers complete)")
+
+        # Ensure loader checks for partial crate
         if done_pickers.value == 3:
-            # All pickers finished — trigger loader to check for final crate
             full_crate_sem.release()
 
 
 def loader(crate, crate_index, full_crate_sem, done_pickers, crate_lock, done_lock):
-    crate_count = 0
+    crate_number = 0
     while True:
         full_crate_sem.acquire()
 
         with crate_lock:
             if crate_index.value > 0:
-                crate_count += 1
-                time.sleep(0.01)  # Simulate load time
-                print(f"🚚 Loader loading crate {crate_count}: {list(crate[:crate_index.value])} ({crate_index.value} fruits)\n")
+                crate_number += 1
+                loaded = list(crate[:crate_index.value])
+                print(f"[Loader] Loading crate {crate_number} with {crate_index.value} fruit(s): {loaded}\n")
                 crate_index.value = 0
 
-            # Ensure loader exits after all pickers are done and all crates are loaded
+        with done_lock:
             if done_pickers.value == 3 and crate_index.value == 0:
-                print("📦 All crates loaded. Loader exiting.")
+                print("[Loader] All crates loaded. Exiting.\n")
                 break
 
 
 def main():
-    tree = list(range(1, 37))  # You can change this number (e.g., 24, 25, 36) to test both edge cases
+    try:
+        total_fruits = int(input("Enter total number of fruits on the tree: ").strip())
+        if total_fruits <= 0:
+            print("Error: Please enter a positive integer.")
+            return
+    except ValueError:
+        print("Error: Invalid input. Please enter a valid number.")
+        return
 
-    # Shared variables
-    crate = Array('i', CRATE_SIZE)       # Shared crate
-    crate_index = Value('i', 0)          # Current index in the crate
-    tree_index = Value('i', 0)           # Current index on the tree
-    full_crate_sem = Semaphore(0)        # Signals loader when crate is full
-    done_pickers = Value('i', 0)         # How many pickers are done
+    tree = list(range(1, total_fruits + 1))
 
-    crate_lock = Lock()                  # Protect crate and crate_index
-    done_lock = Lock()                   # Protect tree_index and done_pickers
+    # Shared resources
+    crate = Array('i', CRATE_SIZE)
+    crate_index = Value('i', 0)
+    tree_index = Value('i', 0)
+    done_pickers = Value('i', 0)
 
-    # Picker processes
+    # Synchronization
+    full_crate_sem = Semaphore(0)
+    crate_lock = Lock()
+    done_lock = Lock()
+
+    # Create and start picker processes
     pickers = [
         Process(
             target=picker,
             name=f"Picker-{i+1}",
             args=(tree, crate, crate_index, tree_index, full_crate_sem, crate_lock, done_pickers, done_lock)
-        )
-        for i in range(3)
+        ) for i in range(3)
     ]
 
-    # Loader process
     loader_proc = Process(
         target=loader,
         args=(crate, crate_index, full_crate_sem, done_pickers, crate_lock, done_lock)
     )
 
-    # Start processes
     for p in pickers:
         p.start()
     loader_proc.start()
 
-    # Wait for all to complete
     for p in pickers:
         p.join()
     loader_proc.join()
 
-    print("\n🎉 All fruits picked and crates loaded successfully!")
+    print("\nAll operations completed successfully.")
 
 
 if __name__ == "__main__":
