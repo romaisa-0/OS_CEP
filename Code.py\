@@ -1,102 +1,103 @@
-import threading
+from multiprocessing import Process, Semaphore, Value, Array, current_process, Lock
 import time
 
-# Global resources
-tree_fruits = [i for i in range(1, 31)]  # The fruits on the tree
-crate = []  # Shared crate with max 12 fruits
-truck = []  # List of crates loaded into the truck
-done_picking = threading.Event()  # To signal when all pickers are done
+CRATE_SIZE = 12  # Crate holds 12 fruits
 
-# Lock and condition for crate management
-tree_lock = threading.Lock()  # Ensures mutual exclusion for tree access
-crate_condition = threading.Condition()  # Condition for crate operations
+def picker(tree, crate, crate_index, tree_index, full_crate_sem, crate_lock, done_pickers, done_lock):
+    while True:
+        fruit = None
 
-class Picker(threading.Thread):
-    def __init__(self, picker_id):
-        super().__init__()
-        self.picker_id = picker_id
+        # Check if there are any fruits left to pick
+        with done_lock:
+            if tree_index.value >= len(tree):
+                break
 
-    def run(self):
-        while True:
-            # Pick fruit from tree if available
-            with tree_lock:
-                if tree_fruits:
-                    fruit = tree_fruits.pop()
-                    print(f"[Picker {self.picker_id}] Picked fruit {fruit}.")
-                else:
-                    break  # No fruits left to pick
+        with crate_lock:
+            if crate_index.value < CRATE_SIZE:
+                with done_lock:
+                    if tree_index.value < len(tree):
+                        fruit_index = tree_index.value
+                        fruit = tree[fruit_index]
+                        tree_index.value += 1
 
-            # Place fruit in crate
-            with crate_condition:
-                while len(crate) == 12:  # Wait if crate is full
-                    print(f"[Picker {self.picker_id}] Crate full, waiting for loader.")
-                    crate_condition.wait()
+                if fruit is not None:
+                    crate[crate_index.value] = fruit
+                    print(f"{current_process().name} picked fruit {fruit} and placed it in slot [{crate_index.value}/{CRATE_SIZE - 1}]")
+                    crate_index.value += 1
 
-                crate.append(fruit)
-                print(f"[Picker {self.picker_id}] Placed fruit {fruit} in crate. Crate size: {len(crate)}/12")
+                    if crate_index.value == CRATE_SIZE:
+                        print(f"📢 {current_process().name} filled the crate. Notifying the loader...")
+                        print(f"🧺 Crate contents: {list(crate[:CRATE_SIZE])}\n")
+                        full_crate_sem.release()
 
-                # Notify the loader if the crate is full
-                if len(crate) == 12:
-                    print(f"[Picker {self.picker_id}] Crate full. Notifying loader.")
-                    crate_condition.notify()
+    # Picker done
+    with done_lock:
+        done_pickers.value += 1
+        print(f"✅ {current_process().name} finished. {done_pickers.value}/3 pickers done.")
+        if done_pickers.value == 3:
+            # All pickers finished — trigger loader to check for final crate
+            full_crate_sem.release()
 
-        print(f"[Picker {self.picker_id}] No more fruits to pick. Exiting.")
 
-class Loader(threading.Thread):
-    def run(self):
-        while True:
-            with crate_condition:
-                # Wait until the crate is full or all pickers are done
-                while len(crate) < 12 and not done_picking.is_set():
-                    crate_condition.wait()
+def loader(crate, crate_index, full_crate_sem, done_pickers, crate_lock, done_lock):
+    crate_count = 0
+    while True:
+        full_crate_sem.acquire()
 
-                if not crate and done_picking.is_set():
-                    break  # Exit if no more crates and pickers are done
+        with crate_lock:
+            if crate_index.value > 0:
+                crate_count += 1
+                time.sleep(0.01)  # Simulate load time
+                print(f"🚚 Loader loading crate {crate_count}: {list(crate[:crate_index.value])} ({crate_index.value} fruits)\n")
+                crate_index.value = 0
 
-                # Load the full crate into the truck
-                if crate:
-                    print("[Loader] Loading crate into truck...")
-                    time.sleep(2)  # Simulate loading time
-                    truck.append(crate.copy())
-                    print(f"[Loader] Crate loaded: {crate}")
-                    crate.clear()  # Empty the crate after loading
-                    crate_condition.notify_all()  # Notify pickers that crate is empty
+            # Ensure loader exits after all pickers are done and all crates are loaded
+            if done_pickers.value == 3 and crate_index.value == 0:
+                print("📦 All crates loaded. Loader exiting.")
+                break
 
-        # Final check for any remaining fruits in a partial crate
-        with crate_condition:
-            if crate:
-                print("[Loader] Final partial crate detected. Loading it.")
-                truck.append(crate.copy())
-                crate.clear()
-
-        print("[Loader] No more crates to load. Exiting.")
 
 def main():
-    loader = Loader()
-    pickers = [Picker(i) for i in range(1, 4)]
+    tree = list(range(1, 37))  # You can change this number (e.g., 24, 25, 36) to test both edge cases
 
-    loader.start()
-    for picker in pickers:
-        picker.start()
+    # Shared variables
+    crate = Array('i', CRATE_SIZE)       # Shared crate
+    crate_index = Value('i', 0)          # Current index in the crate
+    tree_index = Value('i', 0)           # Current index on the tree
+    full_crate_sem = Semaphore(0)        # Signals loader when crate is full
+    done_pickers = Value('i', 0)         # How many pickers are done
 
-    for picker in pickers:
-        picker.join()
+    crate_lock = Lock()                  # Protect crate and crate_index
+    done_lock = Lock()                   # Protect tree_index and done_pickers
 
-    # Signal loader that all pickers are done
-    done_picking.set()
+    # Picker processes
+    pickers = [
+        Process(
+            target=picker,
+            name=f"Picker-{i+1}",
+            args=(tree, crate, crate_index, tree_index, full_crate_sem, crate_lock, done_pickers, done_lock)
+        )
+        for i in range(3)
+    ]
 
-    # Ensure the loader processes any remaining crates
-    with crate_condition:
-        crate_condition.notify_all()
+    # Loader process
+    loader_proc = Process(
+        target=loader,
+        args=(crate, crate_index, full_crate_sem, done_pickers, crate_lock, done_lock)
+    )
 
-    loader.join()
+    # Start processes
+    for p in pickers:
+        p.start()
+    loader_proc.start()
 
-    # Final report of what was loaded into the truck
-    print("\n=== Final Report ===")
-    print(f"Crates loaded into truck: {len(truck)}")
-    for i, c in enumerate(truck, 1):
-        print(f"Crate {i}: {c}")
-    print("====================")
+    # Wait for all to complete
+    for p in pickers:
+        p.join()
+    loader_proc.join()
+
+    print("\n🎉 All fruits picked and crates loaded successfully!")
+
 
 if __name__ == "__main__":
     main()
